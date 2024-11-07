@@ -1,0 +1,5 @@
+moat-lib-cmd (0.2.1-1) unstable; urgency=medium
+
+  * Initial Debianization.
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Thu, 07 Nov 2024 19:31:47 +0100
