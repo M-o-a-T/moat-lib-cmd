@@ -2,3 +2,4 @@ __pycache__/
 /.coverage
 /.pybuild/
 /build/
+/moat_lib_cmd.egg-info/

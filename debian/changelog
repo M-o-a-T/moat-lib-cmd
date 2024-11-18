@@ -1,3 +1,9 @@
+moat-lib-cmd (0.2.4-2) unstable; urgency=medium
+
+  * Ignore nonsense
+
+ -- Matthias Urlichs <matthias@urlichs.de>  Mon, 18 Nov 2024 12:12:36 +0100
+
 moat-lib-cmd (0.2.4-1) unstable; urgency=medium
 
   * Merge
