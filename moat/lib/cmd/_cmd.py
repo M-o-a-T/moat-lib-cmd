@@ -3,6 +3,7 @@ from __future__ import annotations
 from moat.util import Queue, CtxObj, QueueFull
 from moat.util.compat import TaskGroup, CancelScope, const, CancelledError
 from contextlib import asynccontextmanager
+import outcome
 
 try:
     from anyio import Event
@@ -208,11 +209,12 @@ class CmdHandler(CtxObj):
         await msg._send(a, kw if kw else None)
         try:
             await msg.replied()
-            return msg._msg
         except BaseException as exc:
             await msg.kill(exc)
             raise
-        else:
+        try:
+            return msg._msg.unwrap()
+        finally:
             await msg.kill()
 
     def add(self, msg):
@@ -293,7 +295,7 @@ class CmdHandler(CtxObj):
             async with msg._stream(d, kw, sin, sout):
                 try:
                     yield msg
-                except Exception as exc:
+                except BaseException as exc:
                     await msg.kill(exc)
                     raise
                 else:
@@ -350,8 +352,8 @@ class CmdHandler(CtxObj):
             try:
                 yield self
             finally:
-                #               for conv in self._msgs.values():
-                #                   await conv.kill()
+                for conv in self._msgs.values():
+                    conv.kill_nc()
                 tg.cancel()
         self._msgs = {}
 
@@ -427,6 +429,9 @@ class Msg:
         return r + ">"
 
     async def kill(self, exc=None):
+        """
+        Stop this stream.
+        """
         if self.parent is None:
             return
 
@@ -454,17 +459,28 @@ class Msg:
 
         self.ended()
 
+    def kill_nc(self, exc=None):
+        """
+        Stop this stream (backend died).
+        """
+        self.stream_out = S_END
+        self.stream_in = S_OFF
+        self.cmd_in.set()
+        if self._recv_q is not None:
+            try:
+                self._recv_q.put_nowait_error(LinkDown())
+            except EOFError:
+                pass
+
     @property
     def msg(self):
-        if isinstance(self._msg, Exception):
-            raise self._msg
+        if isinstance(self._msg, outcome.Outcome):
+            self._msg = self._msg.unwrap()
         self.__dict__["msg"] = self._msg
         return self._msg
 
     @property
     def cmd(self):
-        if isinstance(self._msg, Exception):
-            raise self._msg
         self.__dict__["cmd"] = self._cmd
         return self._cmd
 
@@ -487,9 +503,9 @@ class Msg:
         self.__dict__.pop("cmd", None)
         self.__dict__.pop("data", None)
         if msg[0] & B_ERROR:
-            self._msg = StreamError(_SA1(msg))
+            self._msg = outcome.Error(StreamError(_SA1(msg)))
         else:
-            self._msg = _SA1(msg)
+            self._msg = outcome.Value(_SA1(msg))
             self._cmd = msg[1]
             if isinstance(msg[-1], dict):
                 self._data = msg[-1]
