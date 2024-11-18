@@ -123,47 +123,6 @@ class StreamError(RuntimeError):
     pass
 
 
-class _SA1:
-    """
-    shift a readonly list by 1. This is a minimal implementation, intended
-    to avoid copying long-ish arrays.
-    """
-
-    def __new__(cls, a):
-        if len(a) < 10:
-            return a[1:]
-        return object.__new__(cls, a)
-
-    def __init__(self, a):
-        self.a = a
-
-    def __len__(self):
-        return len(self.a) - 1
-
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            i = slice(
-                i.start if i.start < 0 else i.start + 1,
-                i.stop if i.stop < 0 else i.stop + 1,
-                i.end,
-            )
-            return self.a[i]
-        elif i >= 0:
-            return self.a[i + 1]
-        elif i >= -len(self.a):
-            return self.a[i]
-        else:
-            raise IndexError(i)
-
-    def __repr__(self):
-        return repr(self.a[1:])
-
-    def __iter__(self):
-        it = iter(self.a)
-        next(it)  # skip first
-        return it
-
-
 @_exp
 class CmdHandler(CtxObj):
     """
@@ -213,7 +172,10 @@ class CmdHandler(CtxObj):
             await msg.kill(exc)
             raise
         try:
-            return msg._msg.unwrap()
+            res = msg._msg.unwrap()
+            if len(res) > 1 and isinstance(res[-1],dict) and not res[-1] and isinstance(res[-2],dict):
+                res = res[:-1]
+            return res
         finally:
             await msg.kill()
 
@@ -313,11 +275,14 @@ class CmdHandler(CtxObj):
 
     async def msg_out(self):
         i, d, kw = await self._send_q.get()
+
         # this is somewhat inefficient but oh well
-        if kw:
-            return (i,) + tuple(d) + (kw,)
-        else:
+        if kw is None and isinstance(d[-1], dict):
+            kw = {}
+        if kw is None:
             return (i,) + tuple(d)
+        else:
+            return (i,) + tuple(d) + (kw,)
 
     async def msg_in(self, msg):
         i = msg[0]
@@ -393,6 +358,7 @@ class Msg:
         self._recv_skip = False
         self.scope = None
         self.s_out = s_out
+        self._initial = False
 
     def __getitem__(self, k):
         return self.data[k]
@@ -426,6 +392,9 @@ class Msg:
                 r += repr(self.stream_in)
             if self._fli is not None:
                 r += repr(self._fli)
+        msg = self._msg
+        if msg is not None:
+            r += " D:"+repr(msg)
         return r + ">"
 
     async def kill(self, exc=None):
@@ -473,44 +442,49 @@ class Msg:
                 pass
 
     @property
-    def msg(self):
-        if isinstance(self._msg, outcome.Outcome):
-            self._msg = self._msg.unwrap()
-        self.__dict__["msg"] = self._msg
-        return self._msg
-
-    @property
     def cmd(self):
-        self.__dict__["cmd"] = self._cmd
+        "Retrieve the command."
+        self._unwrap()
         return self._cmd
 
     @property
-    def data(self):
-        if isinstance(self._msg, Exception):
-            raise self._msg
-        self.__dict__["data"] = self._data
-        return self._data
+    def args(self):
+        "Retrieve the argument list. NB the command is *not* removed."
+        self._unwrap()
+        return self._args
+
+    @property
+    def kw(self):
+        "Retrieve the keywords."
+        self._unwrap()
+        return self._kw
+
+    def _unwrap(self):
+        # disassemble the message.
+        if not isinstance(self._msg, outcome.Outcome):
+            return
+        msg = self._msg.unwrap()
+        self._kw = msg.pop() if isinstance(msg[-1], dict) else None
+        self._cmd = msg.pop(0) if self._initial else None
+        self._args = msg
+        self._msg = None
 
     def _set_msg(self, msg):
         if self.stream_in == S_END:
             pass  # happens when msg2 is set
-        elif not (msg[0] & B_STREAM):
-            self.stream_in = S_END
-        elif self.stream_in == S_NEW and not (msg[0] & B_ERROR):
-            self.stream_in = S_ON
-
-        self.__dict__.pop("msg", None)
-        self.__dict__.pop("cmd", None)
-        self.__dict__.pop("data", None)
-        if msg[0] & B_ERROR:
-            self._msg = outcome.Error(StreamError(_SA1(msg)))
         else:
-            self._msg = outcome.Value(_SA1(msg))
-            self._cmd = msg[1]
-            if isinstance(msg[-1], dict):
-                self._data = msg[-1]
-            else:
-                self._data = None
+            self._initial = msg[0] >= 0 and self.stream_in == S_NEW
+            if not (msg[0] & B_STREAM):
+                self.stream_in = S_END
+            elif self.stream_in == S_NEW and not (msg[0] & B_ERROR):
+                self.stream_in = S_ON
+
+        if isinstance(msg,tuple):
+            breakpoint()
+        if msg[0] & B_ERROR:
+            self._msg = outcome.Error(StreamError(msg[1:]))
+        else:
+            self._msg = outcome.Value(msg[1:])
         self.cmd_in.set()
         if self.stream_in != S_END:
             self.cmd_in = Event()
@@ -572,7 +546,7 @@ class Msg:
 
         elif self._recv_q is not None:
             try:
-                self._recv_q.put_nowait(_SA1(msg))
+                self._recv_q.put_nowait(msg[1:])
             except QueueFull:
                 self._recv_skip = True
 
@@ -723,7 +697,9 @@ class Msg:
             await self.warn(self._recv_qlen)
 
         await self._send(d, kw, stream=True)
-        await self.replied()
+        if self._i >= 0:
+            # Wait for the initial reply if we're the sender.
+            await self.replied()
 
         yield self
 
